@@ -16,12 +16,12 @@ OUT_KEYFRAMES = f"{ROOT}/latent/keyframes"
 OUT_CANDIDATES = f"{ROOT}/latent/candidates"
 OUT_META = f"{ROOT}/datasets/keyframes_meta_gpt4o.json"
 
-MODEL = "gpt-4o-mini"
-K_CANDIDATES = 200
+MODEL = "gpt-4o"
+K_CANDIDATES = 100
 N_SELECT = 4
 TEMPERATURE = 0.0
-CANDIDATE_MAX_WH = 512      # 候选帧最长边像素，控制体积（越小越省 token）
-CANDIDATE_JPEG_Q = 4        # ffmpeg jpeg 质量（2-6 常用；数值越大越小体积越小）
+CANDIDATE_MAX_WH = 512
+CANDIDATE_JPEG_Q = 4
 
 def ensure_dir(p: str):
     pathlib.Path(p).mkdir(parents=True, exist_ok=True)
@@ -94,13 +94,20 @@ def image_to_data_url(img_path: str) -> str:
 
 def build_messages(question: str,
                    answer_choices: List[str],
-                   candidate_infos: List[Tuple[int, float, str]]) -> List[Dict]:
+                   candidate_infos: List[Tuple[int, float, str]],
+                   answer: str) -> List[Dict]:
     header_lines = [
         "You are given a video represented by candidate frames.",
-        "Your task: pick EXACTLY 4 frames that are most useful to answer the question.",
-        f"Return ONLY valid JSON with this schema:",
-        '{"selected": [i0, i1, i2, i3]}  # 4 unique integers from the provided indices',
-        "Do NOT include any extra text.",
+        "Your task: pick EXACTLY 4 frames that are most useful to answer the question,",
+        "and provide, for each selected frame, ONE short key object label (a visible noun phrase, lowercase, 1-3 words).",
+        "Return ONLY valid JSON with this schema:",
+        '{"selected": [i0, i1, i2, i3], "labels": ["label_for_i0", "label_for_i1", "label_for_i2", "label_for_i3"]}',
+        "Rules:",
+        "- Indices must come from the provided candidate indices; they must be 4 unique integers.",
+        "- labels must be aligned with the same order as `selected`.",
+        "- Each label must be a concrete, visible object (noun phrase). No verbs or abstract words (e.g., 'playing', 'activity', 'background').",
+        "- Use lowercase english; keep it short (<=3 words).",
+        "- JSON only. No extra text.",
         "",
         f"Question: {question}",
     ]
@@ -108,6 +115,10 @@ def build_messages(question: str,
         header_lines.append("Choices:")
         for i, ch in enumerate(answer_choices):
             header_lines.append(f"- {chr(65+i)}. {ch}")
+    # Include the correct answer to stabilize selection
+    if answer:
+        header_lines.append("")
+        header_lines.append(f"Correct answer: {answer}")
 
     header_text = "\n".join(header_lines)
 
@@ -124,7 +135,7 @@ def build_messages(question: str,
     return messages
 
 def call_gpt4o_select_indices(client: OpenAI,
-                              messages: List[Dict]) -> List[int]:
+                              messages: List[Dict]) -> Tuple[List[int], List[str]]:
     resp = client.chat.completions.create(
         model=MODEL,
         messages=messages,
@@ -135,10 +146,15 @@ def call_gpt4o_select_indices(client: OpenAI,
     try:
         data = json.loads(text)
         selected = data.get("selected", [])
-        selected = list(dict.fromkeys(selected))[:N_SELECT]
-        return selected
+        labels = data.get("labels", [])
+        # ensure 4 unique indices and aligned labels
+        selected = list(dict.fromkeys(int(i) for i in selected))[:N_SELECT]
+        if len(selected) != N_SELECT or not isinstance(labels, list) or len(labels) < N_SELECT:
+            return [], []
+        labels = [str(l).strip().lower() for l in labels[:N_SELECT]]
+        return selected, labels
     except Exception:
-        return []
+        return [], []
 
 def main():
     ensure_dir(OUT_KEYFRAMES)
@@ -158,6 +174,7 @@ def main():
     for it in items:
         vid = it["video_id"]
         q = it.get("question", "")
+        answer = it.get("answer")
         video_path = f"{VIDEO_DIR}/{vid}.mp4"
         if not os.path.exists(video_path):
             print(f"Missing video file: {video_path}, skipped")
@@ -193,14 +210,13 @@ def main():
             print(f"Too few candidate frames ({len(cand_infos)}), skipped {vid}")
             continue
 
-        messages = build_messages(q, choices, cand_infos)
-        selected_idx = call_gpt4o_select_indices(client, messages)
+        messages = build_messages(q, choices, cand_infos, answer=answer)
+        selected_idx, selected_labels = call_gpt4o_select_indices(client, messages)
 
-        if len(selected_idx) < N_SELECT:
-            print(f"Model did not return enough indices (got {selected_idx}), skipped {vid}")
+        if len(selected_idx) < N_SELECT or len(selected_labels) < N_SELECT:
+            print(f"Model did not return enough indices or labels (got indices {selected_idx}, labels {selected_labels}), skipped {vid}")
             continue
 
-        key_seconds = []
         frame_out_paths = []
         keyframe_dir = pathlib.Path(OUT_KEYFRAMES) / vid
         ensure_dir(str(keyframe_dir))
@@ -211,7 +227,6 @@ def main():
             out_png = str(keyframe_dir / f"{vid}_frame_{i}.png")
             try:
                 extract_frame_at(video_path, t, out_png)
-                key_seconds.append(t)
                 frame_out_paths.append(out_png)
             except Exception as e:
                 print(f"Keyframe extraction failed idx={idx}, t={t:.2f}s: {e}")
@@ -220,15 +235,12 @@ def main():
             print(f"Final keyframes less than 4, skipped {vid}")
             continue
 
-        rec = {
-            "video_id": vid,
-            "question": q,
-            "answer": it.get("answer"),
-            "key_seconds": [round(s, 3) for s in key_seconds],
-            "frames": frame_out_paths,
-        }
-        for i, ch in enumerate(choices):
-            rec[f"answer_choice_{i}"] = ch
+        print(f"Selected indices: {selected_idx}")
+        print(f"Frame labels: {selected_labels}")
+
+        rec = dict(it)  # preserve all original fields
+        rec["frames"] = frame_out_paths
+        rec["frame_labels"] = selected_labels  # aligned with frames order
         all_results.append(rec)
 
         print(f"{vid} keyframes done -> {frame_out_paths}")

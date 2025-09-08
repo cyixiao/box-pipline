@@ -11,8 +11,8 @@ from transformers import CLIPSegProcessor, CLIPSegForImageSegmentation
 
 # ================== 路径配置 ==================
 ROOT = "/home/cyixiao/Project/videollm/pipline"
-IN_META  = f"{ROOT}/datasets/keyframes_meta_gpt4o.json"              # 含 frames + frame_labels
-OUT_META = f"{ROOT}/datasets/keyframes_meta_gpt4o_with_boxes.json"   # 输出（与 GPT 版本同名/同结构）
+IN_META  = f"{ROOT}/datasets/keyframes_minerva_gpt4o_labels.json"              # 含 frames + frame_labels
+OUT_META = f"{ROOT}/datasets/keyframes_minerva_gpt4o_boxes.json"   # 输出（与 GPT 版本同名/同结构）
 
 # ================== 设备 & 模型 ==================
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
@@ -23,9 +23,10 @@ SCALE_MAX = 1000  # 0-1000 的整数坐标
 
 # ================== 分割/筛选参数（可按需微调） ==================
 # 阈值扫描：从多个阈值里挑一个“更紧且可靠”的掩码
-THRESHOLDS = [0.50, 0.55, 0.60, 0.65, 0.70]
-AREA_MIN = 0.01      # 掩码面积占比下限
-AREA_MAX = 0.70      # 掩码面积占比上限（避免整图）
+# THRESHOLDS = [0.50, 0.55, 0.60, 0.65, 0.70]
+THRESHOLDS = [0.25, 0.35, 0.40, 0.45, 0.50, 0.55, 0.60]
+AREA_MIN = 0.002      # 掩码面积占比下限
+AREA_MAX = 0.90      # 掩码面积占比上限（避免整图）
 CENTER_BONUS = 0.05  # 掩码重心越靠近图像中心加一点分
 SIZE_PRIOR = 0.25    # 偏好中等面积（越接近此值加分）
 

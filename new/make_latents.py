@@ -9,15 +9,15 @@ from PIL import Image, ImageDraw
 ROOT = "/home/cyixiao/Project/videollm/pipline"
 
 # 关键帧 + 坐标的元数据（上一步生成的）
-IN_KEYFRAMES_META = f"{ROOT}/datasets/keyframes_meta_gpt4o_with_boxes.json"
+IN_KEYFRAMES_META = f"{ROOT}/datasets/train/minerva_boxes.json"
 
 # 之前保存的抽样元数据（需要在里面新增两个字段）
-SAMPLED_META_IN  = f"{ROOT}/datasets/sampled_meta.json"
-SAMPLED_META_OUT = f"{ROOT}/datasets/sampled_meta_with_latent.json"   # 想覆盖就把 OUT 改成 IN
+SAMPLED_META_IN  = f"{ROOT}/datasets/train/minerva.json"
+SAMPLED_META_OUT = f"{ROOT}/datasets/train/minerva_latent.json"   # 想覆盖就把 OUT 改成 IN
 
 # 输出图片目录
-OUT_ENLARGE_DIR = f"{ROOT}/latent/enlarge"
-OUT_BBOX_DIR    = f"{ROOT}/latent/bbox"
+OUT_ENLARGE_DIR = f"{ROOT}/datasets/train/latent/enlarge"
+OUT_BBOX_DIR    = f"{ROOT}/datasets/train/latent/bbox"
 
 # ================== 可调参数 ==================
 DRAW_WIDTH = 3            # 画框线宽
@@ -90,8 +90,13 @@ def main():
     sm_data: List[Dict[str, Any]] = json.load(open(SAMPLED_META_IN, "r"))
 
     updated = []
+    vid_counter: Dict[str, int] = {}
     for item in sm_data:
         vid = item.get("video_id")
+        # 为同一视频的第几个问题分配递增编号（_1, _2, ...）
+        qidx = vid_counter.get(vid, 0) + 1
+        vid_counter[vid] = qidx
+        vid_q = f"{vid}_{qidx}"
         if vid not in kf_index:
             # 没有关键帧/坐标的样本直接保留原样
             updated.append(item)
@@ -105,18 +110,27 @@ def main():
         for i in range(n):
             frame_path = frames[i]
             box = bboxes_pix[i]
-            # 输出文件名
-            subdir_enlarge = pathlib.Path(OUT_ENLARGE_DIR) / vid
-            subdir_bbox    = pathlib.Path(OUT_BBOX_DIR) / vid
-            out_enlarge = str(subdir_enlarge / f"{vid}_frame_{i+1}.png")
-            out_bbox    = str(subdir_bbox    / f"{vid}_frame_{i+1}.png")
+            # 输出文件名（每个问题单独文件夹：video_id_1, video_id_2, ...；文件名为 keyframe_1.png ...）
+            subdir_enlarge_abs = pathlib.Path(OUT_ENLARGE_DIR) / vid_q
+            subdir_bbox_abs    = pathlib.Path(OUT_BBOX_DIR) / vid_q
+
+            # 相对路径前缀，写入 JSON 时不带绝对路径，只以 /latent/... 开头
+            rel_enlarge_prefix = f"/latent/enlarge/{vid_q}"
+            rel_bbox_prefix    = f"/latent/bbox/{vid_q}"
+
+            filename = f"keyframe_{i+1}.png"
+            out_enlarge_abs = str(subdir_enlarge_abs / filename)
+            out_bbox_abs    = str(subdir_bbox_abs / filename)
+            out_enlarge_rel = f"{rel_enlarge_prefix}/{filename}"
+            out_bbox_rel    = f"{rel_bbox_prefix}/{filename}"
 
             # 生成并保存
             try:
-                save_enlarge(frame_path, box, out_enlarge)
-                save_bbox_vis(frame_path, box, out_bbox)
-                enlarge_paths.append(out_enlarge)
-                bbox_paths.append(out_bbox)
+                save_enlarge(frame_path, box, out_enlarge_abs)
+                save_bbox_vis(frame_path, box, out_bbox_abs)
+                # 写回 JSON 时仅保存相对路径（/latent/...）
+                enlarge_paths.append(out_enlarge_rel)
+                bbox_paths.append(out_bbox_rel)
             except Exception as e:
                 print(f"⚠️ {vid} frame_{i+1} failed: {e}")
 
@@ -126,7 +140,7 @@ def main():
         item["boundingbox _latent"] = bbox_paths
 
         updated.append(item)
-        print(f"✓ {vid}: enlarge={len(enlarge_paths)}  bbox={len(bbox_paths)}")
+        print(f"✓ {vid_q}: enlarge={len(enlarge_paths)}  bbox={len(bbox_paths)}")
 
     # 保存新版本 sampled_meta
     out_path = SAMPLED_META_OUT

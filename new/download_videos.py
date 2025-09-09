@@ -1,7 +1,17 @@
-import json, subprocess, pathlib, os
+import json, subprocess, pathlib, os, argparse
 
-NEPTUNE_JSON = "/home/cyixiao/Project/videollm/pipline/datasets/train/minerva.json"
-OUT_DIR = "/home/cyixiao/Project/videollm/pipline/videos/minerva"
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--in-meta", required=True, help="输入元数据 JSON")
+    ap.add_argument("--out-dir", required=True, help="视频输出目录")
+    ap.add_argument("--field.video_id", dest="field_video_id", required=True, help="字段名：视频ID")
+    ap.add_argument("--field.url", dest="field_url", help="（可选）字段名：视频URL；若为空则按 YouTube 规则拼接")
+    return ap.parse_args()
+
+args = parse_args()
+
+NEPTUNE_JSON = args.in_meta
+OUT_DIR = args.out_dir
 pathlib.Path(OUT_DIR).mkdir(parents=True, exist_ok=True)
 
 with open(NEPTUNE_JSON, "r") as f:
@@ -11,7 +21,7 @@ filtered = data
 
 unique = {}
 for item in filtered:
-    vid = item["video_id"]
+    vid = item[args.field_video_id]
     if vid not in unique:
         unique[vid] = item
 
@@ -21,11 +31,7 @@ print("Total unique video_ids:", len(video_ids))
 if len(video_ids) == 0:
     raise SystemExit("No video_ids found after filtering. Check the input JSON format.")
 
-# Use all unique video_ids without sampling
-sampled_meta = list(unique.values())
-
-with open("/home/cyixiao/Project/videollm/pipline/sampled_meta.json", "w") as f:
-    json.dump(sampled_meta, f, indent=2)
+succeeded, failed = set(), set()
 
 # Optional cookies: set one of these env vars on the server
 #   YTDLP_COOKIES_FILE=/path/to/cookies.txt   (exported from your desktop browser)
@@ -53,12 +59,16 @@ print(f"[info] Using extractor args: {extractor_args}")
 print(f"[info] Using UA: {user_agent[:40]}...")
 
 for vid in video_ids:
-    url = f"https://www.youtube.com/watch?v={vid}"
+    if args.field_url and args.field_url in unique[vid]:
+        url = unique[vid][args.field_url]
+    else:
+        url = f"https://www.youtube.com/watch?v={vid}"
     out_tpl = f"{OUT_DIR}/{vid}.%(ext)s"
     # Skip if final output already exists (merged to mp4)
     final_path = pathlib.Path(OUT_DIR) / f"{vid}.mp4"
     if final_path.exists() and final_path.stat().st_size > 0:
         print(f"[skip] {final_path} already exists. Skipping download.")
+        succeeded.add(vid)
         continue
     cmd = [
         "yt-dlp",
@@ -81,3 +91,21 @@ for vid in video_ids:
     cmd.append(url)
     print("Downloading:", url)
     subprocess.run(cmd, check=False)
+    # Determine success/failure
+    if final_path.exists() and final_path.stat().st_size > 0:
+        print(f"[ok] {vid} -> {final_path}")
+        succeeded.add(vid)
+    else:
+        print(f"[fail] {vid} download failed; will purge its items from {NEPTUNE_JSON}")
+        failed.add(vid)
+
+# Purge failed video items from the ORIGINAL input JSON and print summary
+if failed:
+    before = len(data)
+    failed_str = {str(v) for v in failed}
+    filtered_out = [item for item in data if str(item.get(args.field_video_id)) not in failed_str]
+    pathlib.Path(NEPTUNE_JSON).write_text(json.dumps(filtered_out, indent=2, ensure_ascii=False))
+    print(f"[purge] Removed {before - len(filtered_out)} items for {len(failed)} failed video(s). New dataset size: {len(filtered_out)}")
+else:
+    print("[purge] No failed videos; input JSON left unchanged.")
+print(f"[summary] Success videos: {len(succeeded)}; Failed videos: {len(failed)}")

@@ -1,16 +1,19 @@
-import os, json, pathlib, base64
+import os, json, pathlib, base64, argparse
 from typing import List, Dict, Any, Optional
-from PIL import Image
 from openai import OpenAI
 
-# ================== 路径配置 ==================
-ROOT = "/home/cyixiao/Project/videollm/pipline"
-IN_META  = f"{ROOT}/datasets/train/minerva_keyframes.json"
-OUT_META = f"{ROOT}/datasets/train/minerva_labels.json"
-
-# ================== OpenAI 配置 ==================
-MODEL = "gpt-4o"
-TEMPERATURE = 0.0
+def parse_args():
+    ap = argparse.ArgumentParser(description="Generate short frame-level labels for keyframes using an LLM.")
+    ap.add_argument("--in-meta", required=True, help="输入元数据 JSON（包含 frames 等字段）")
+    ap.add_argument("--output", required=True, help="输出 JSON（写入 frame_labels 字段）")
+    ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：frames 列表")
+    ap.add_argument("--field.question", dest="f_question", required=True, help="字段名：问题文本")
+    ap.add_argument("--field.answer", dest="f_answer", required=True, help="字段名：正确答案")
+    ap.add_argument("--field.reasoning", dest="f_reasoning", required=True, help="字段名：推理/解析")
+    ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_", help="选项字段前缀（默认：answer_choice_）")
+    ap.add_argument("--model", default="gpt-4o", help="LLM 模型（默认：gpt-4o）")
+    ap.add_argument("--temperature", type=float, default=0.0, help="LLM 温度（默认：0.0）")
+    return ap.parse_args()
 
 # ================== 工具函数 ==================
 def ensure_parent(path: str):
@@ -55,7 +58,7 @@ def build_label_prompt(question: str,
     ]
     return {"type": "text", "text": "\n".join(lines)}
 
-def call_gpt4o_label(client: OpenAI,
+def call_gpt4o_label(client: OpenAI, model: str, temperature: float,
                      img_path: str,
                      question: str,
                      answer: Optional[str],
@@ -67,8 +70,8 @@ def call_gpt4o_label(client: OpenAI,
     ]
     try:
         resp = client.chat.completions.create(
-            model=MODEL,
-            temperature=TEMPERATURE,
+            model=model,
+            temperature=temperature,
             response_format={"type": "json_object"},
             messages=[{"role": "user", "content": content}],
         )
@@ -87,27 +90,28 @@ def call_gpt4o_label(client: OpenAI,
 
 # ================== 主流程 ==================
 def main():
+    args = parse_args()
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set. `export OPENAI_API_KEY=...`")
     client = OpenAI(api_key=api_key)
 
-    if not pathlib.Path(IN_META).exists():
-        raise FileNotFoundError(f"missing: {IN_META}")
-    items: List[Dict[str, Any]] = json.load(open(IN_META, "r"))
+    if not pathlib.Path(args.in_meta).exists():
+        raise FileNotFoundError(f"missing: {args.in_meta}")
+    items: List[Dict[str, Any]] = json.load(open(args.in_meta, "r"))
 
     updated = []
     for rec in items:
         vid = rec.get("video_id")
-        q = rec.get("question", "")
-        ans = rec.get("answer")
-        reasoning = rec.get("reasoning", "")
-        frames: List[str] = rec.get("frames", []) or []
+        q = rec.get(args.f_question, "")
+        ans = rec.get(args.f_answer)
+        reasoning = rec.get(args.f_reasoning, "")
+        frames: List[str] = rec.get(args.f_frames, []) or []
 
         # 选项
         choices: List[str] = []
         for i in range(5):
-            k = f"answer_choice_{i}"
+            k = f"{args.f_choices_prefix}{i}"
             if k in rec and rec[k]:
                 choices.append(str(rec[k]))
 
@@ -123,7 +127,7 @@ def main():
                 labels.append("scene")  # 兜底
                 print(f"  frame_{idx}: missing -> label=scene")
                 continue
-            label = call_gpt4o_label(client, fp, q, ans, reasoning, choices)
+            label = call_gpt4o_label(client, args.model, args.temperature, fp, q, ans, reasoning, choices)
             if not label:
                 label = "scene"  # 兜底
             labels.append(label)
@@ -134,11 +138,11 @@ def main():
         out_rec["frame_labels"] = labels  # 与 frames 顺序一一对应
         updated.append(out_rec)
 
-    ensure_parent(OUT_META)
-    with open(OUT_META, "w") as f:
+    ensure_parent(args.output)
+    with open(args.output, "w") as f:
         json.dump(updated, f, indent=2, ensure_ascii=False)
 
-    print(f"\nDONE. Saved to {OUT_META}. {len(updated)} samples updated.")
+    print(f"\nDONE. Saved to {args.output}. {len(updated)} samples updated.")
 
 if __name__ == "__main__":
     main()

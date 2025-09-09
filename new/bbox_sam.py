@@ -1,26 +1,12 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
-import os, json, pathlib, re
+import os, json, pathlib, re, argparse
 from typing import List, Dict, Any, Optional, Tuple
 
 import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
-
-# ================== 路径配置 ==================
-ROOT = "/home/cyixiao/Project/videollm/pipline"
-IN_META  = f"{ROOT}/datasets/train/minerva_labels.json"   # 含 frames (+可选 frame_labels)
-OUT_META = f"{ROOT}/datasets/train/minerva_boxes.json"    # 输出（写回 bbox_xyxy_*）
-
-# ================== 模型与设备 ==================
-MODEL_ID = "IDEA-Research/grounding-dino-base"
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-# ================== 检测与阈值 ==================
-# 文本必须小写 + 每个短语以 '.' 结尾（官方强烈建议）
-BOX_THRESHOLD  = 0.30   # 框分数阈值（可调低到 0.30 以照顾小目标）
-TEXT_THRESHOLD = 0.25   # 文本匹配阈值
 
 # ================== 工具函数 ==================
 def ensure_parent(path: str):
@@ -44,7 +30,7 @@ def clean_label(s: str) -> str:
 def build_query_text(label: str) -> str:
     """
     Grounding DINO 约定：每个短语小写、以 '.' 结尾；可以多个短语用 '. ' 串起来。
-    我们这里每次只查一个主标签；若失败再用同义词或 FALLBACK_LABELS。
+    我们这里每次只查一个主标签。
     """
     label = clean_label(label)
     if not label:
@@ -78,12 +64,14 @@ def pick_best_box(results: Dict[str, Any], want_label: str) -> Optional[List[flo
         return None
     return boxes[best_idx].tolist()  # [x1,y1,x2,y2] in pixels
 
-# ================== 推理核心 ==================
+# ================== 模型封装 ==================
 class GroundingDINO:
-    def __init__(self, model_id: str, device: str):
+    def __init__(self, model_id: str, device: str, box_threshold: float, text_threshold: float):
         self.processor = AutoProcessor.from_pretrained(model_id)
         self.model = AutoModelForZeroShotObjectDetection.from_pretrained(model_id).to(device)
         self.device = device
+        self.box_threshold = float(box_threshold)
+        self.text_threshold = float(text_threshold)
 
     @torch.no_grad()
     def detect_one(self, image: Image.Image, label: str) -> Optional[List[int]]:
@@ -102,8 +90,8 @@ class GroundingDINO:
         processed = self.processor.post_process_grounded_object_detection(
             outputs=outputs,
             input_ids=inputs.input_ids,
-            box_threshold=BOX_THRESHOLD,
-            text_threshold=TEXT_THRESHOLD,
+            box_threshold=self.box_threshold,
+            text_threshold=self.text_threshold,
             target_sizes=[(H, W)],  # 注意顺序是 (height, width)
         )
         # 这里只有一张图，取第 0 个结果
@@ -111,8 +99,7 @@ class GroundingDINO:
         if not res0:
             return None
 
-        # labels 是文本短语；因为我们只传了一个短语，直接挑分最高的也可。
-        # 但为了一致性，这里严格匹配 want。
+        # 严格匹配 want（labels 里是文本短语）
         box = pick_best_box(res0, want)
         if box is None:
             return None
@@ -129,22 +116,41 @@ class GroundingDINO:
             return None
         return self.detect_one(image, primary)
 
+# ================== CLI ==================
+def parse_args():
+    ap = argparse.ArgumentParser(description="Zero-shot object detection for keyframes (Grounding DINO), write pixel xyxy boxes.")
+    # 路径
+    ap.add_argument("--in-meta", required=True, help="输入 JSON（含帧路径、可选帧标签）")
+    ap.add_argument("--output", required=True, help="输出 JSON（写入 bbox 字段）")
+    # 字段映射
+    ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：frames 列表")
+    ap.add_argument("--field.frame_labels", dest="f_frame_labels", required=True, help="字段名：frame_labels 列表")
+    ap.add_argument("--field.bboxes-out", dest="f_bboxes_out", default="bbox_pix", help="输出 bbox 字段名（默认：bbox_pix）")
+    # 模型与阈值
+    ap.add_argument("--model-id", default="IDEA-Research/grounding-dino-base", help="模型ID（默认：IDEA-Research/grounding-dino-base）")
+    ap.add_argument("--box-threshold", type=float, default=0.30, help="框分数阈值（默认 0.30）")
+    ap.add_argument("--text-threshold", type=float, default=0.25, help="文本匹配阈值（默认 0.25）")
+    return ap.parse_args()
+
 # ================== 主流程 ==================
 def main():
-    detector = GroundingDINO(MODEL_ID, DEVICE)
+    args = parse_args()
 
-    if not pathlib.Path(IN_META).exists():
-        raise FileNotFoundError(f"missing: {IN_META}")
-    items: List[Dict[str, Any]] = json.load(open(IN_META, "r"))
+    # 设备自动选择
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    detector = GroundingDINO(args.model_id, device, args.box_threshold, args.text_threshold)
+
+    if not pathlib.Path(args.in_meta).exists():
+        raise FileNotFoundError(f"missing: {args.in_meta}")
+    items: List[Dict[str, Any]] = json.load(open(args.in_meta, "r"))
 
     total_frames = 0
     total_fallbacks = 0
 
     updated = []
     for rec in items:
-        vid = rec.get("video_id")
-        frames: List[str] = rec.get("frames", []) or []
-        labels: List[str] = rec.get("frame_labels", []) or []
+        frames: List[str] = rec.get(args.f_frames, []) or []
+        labels: List[str] = rec.get(args.f_frame_labels, []) or []
 
         if not frames:
             updated.append(rec); continue
@@ -153,7 +159,7 @@ def main():
         fallback = 0
         missed = 0
 
-        print(f"\n✓ {vid}: {len(frames)} frames")
+        print(f"\n✓ frames={len(frames)}")
         for i, fp in enumerate(frames):
             total_frames += 1
             if not pathlib.Path(fp).exists():
@@ -180,16 +186,15 @@ def main():
             bbox_pix_list.append(box_pix)
 
         # 写回
-        rec.pop("bbox", None)
-        rec["bbox_xyxy_pix"]  = bbox_pix_list
+        rec[args.f_bboxes_out]  = bbox_pix_list
         updated.append(rec)
 
         print(f"  summary: fallback_full_image={fallback}, missing_files={missed}")
 
-    ensure_parent(OUT_META)
-    with open(OUT_META, "w") as f:
+    ensure_parent(args.output)
+    with open(args.output, "w") as f:
         json.dump(updated, f, indent=2, ensure_ascii=False)
-    print(f"\nDONE. Saved to {OUT_META}. {len(updated)} samples updated.")
+    print(f"\nDONE. Saved to {args.output}. {len(updated)} samples updated.")
 
     if total_frames > 0:
         percent = total_fallbacks / total_frames * 100

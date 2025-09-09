@@ -1,37 +1,7 @@
-import os, io, json, base64, math, pathlib, subprocess, re
+import os, io, json, base64, pathlib, subprocess, re, argparse
 from typing import List, Tuple, Dict, Optional
 
 from openai import OpenAI
-
-# ================== 路径与常量 ==================
-ROOT = "/home/cyixiao/Project/videollm/pipline"
-
-# 输入：你前面抽样保存的 meta（download_videos.py 默认写到这里）
-SAMPLED_META = f"{ROOT}/datasets/train/minerva.json"
-
-# 视频目录：优先 minerva，找不到再回退 raw
-VIDEO_DIRS = [
-    f"{ROOT}/videos/minerva",
-]
-
-# 输出：关键帧与候选帧
-OUT_KEYFRAMES = f"{ROOT}/datasets/train/latent/keyframes"
-OUT_CANDIDATES = f"{ROOT}/datasets/train/latent/candidates"
-
-# 输出：带 frames 的 meta（不含 labels）
-OUT_META = f"{ROOT}/datasets/train/minerva_keyframes.json"
-
-# LLM 相关（仅在需要补帧时调用）
-MODEL = "gpt-4o"
-TEMPERATURE = 0.0
-
-# 候选帧采样（给 LLM 看的缩略图）
-K_CANDIDATES = 100
-CANDIDATE_MAX_WH = 512
-CANDIDATE_JPEG_Q = 4
-
-# 最少关键帧数量
-N_MIN_SELECT = 4
 
 # ================== 基础工具 ==================
 def ensure_dir(path: str):
@@ -70,7 +40,7 @@ def extract_frame_at(video_path: str, time_sec: float, out_path: str) -> None:
         raise RuntimeError(f"ffmpeg extract failed: {err}")
 
 def extract_candidate_frame(video_path: str, time_sec: float, out_path: str,
-                            max_wh: int = CANDIDATE_MAX_WH, q: int = CANDIDATE_JPEG_Q) -> None:
+                            max_wh: int, q: int) -> None:
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error",
         "-ss", f"{time_sec:.3f}",
@@ -91,13 +61,12 @@ def image_to_data_url(img_path: str) -> str:
     mime = "image/jpeg" if img_path.lower().endswith((".jpg", ".jpeg")) else "image/png"
     return f"data:{mime};base64,{b64}"
 
-def find_video_file(video_id: str) -> Optional[str]:
+def find_video_file(video_dir: str, video_id: str) -> Optional[str]:
     exts = [".mp4", ".mkv", ".webm", ".m4v", ".mov"]
-    for d in VIDEO_DIRS:
-        for ext in exts:
-            p = pathlib.Path(d) / f"{video_id}{ext}"
-            if p.exists():
-                return str(p)
+    for ext in exts:
+        p = pathlib.Path(video_dir) / f"{video_id}{ext}"
+        if p.exists():
+            return str(p)
     return None
 
 # ================== 时间解析 ==================
@@ -118,7 +87,7 @@ def time_to_seconds(s: str) -> Optional[float]:
 def extract_times_from_reasoning(reasoning: str) -> List[float]:
     """
     1) 捕获区间并加入两端点: "00:50 - 00:52", "between 1:06-1:07", "03:37 to 03:41"
-    2) 修复奇怪写法: "01:20-01-26" -> 01:20 到 01:26
+    2) 修复奇怪写法: "01:20-01-26" -> 01:20 到 01:26（此规则易引入误报，默认关闭）
     3) 捕获单点: "mm:ss", "hh:mm:ss"
     """
     if not reasoning:
@@ -140,14 +109,6 @@ def extract_times_from_reasoning(reasoning: str) -> List[float]:
         if ta is not None: times.append(ta)
         if tb is not None: times.append(tb)
 
-    # case C: 修复 "mm:ss-mm-ss"（如 01:20-01-26）
-    # for m, s1, s2 in re.findall(r"(\d{1,2}):(\d{2})-(\d{2})", s):
-    #     a = f"{int(m)}:{int(s1):02d}"
-    #     b = f"{int(m)}:{int(s2):02d}"
-    #     ta, tb = time_to_seconds(a), time_to_seconds(b)
-    #     if ta is not None: times.append(ta)
-    #     if tb is not None: times.append(tb)
-
     # case D: 单独的 hh:mm:ss
     for t in re.findall(r"\b(\d{1,2}:\d{2}:\d{2})\b", s):
         ts = time_to_seconds(t)
@@ -155,7 +116,6 @@ def extract_times_from_reasoning(reasoning: str) -> List[float]:
             times.append(ts)
 
     # case E: 单独的 mm:ss
-    # 注意避免与 hh:mm:ss 重复；但 set 会去重
     for t in re.findall(r"\b(\d{1,2}:\d{2})\b", s):
         ts = time_to_seconds(t)
         if ts is not None:
@@ -196,11 +156,11 @@ def build_messages_for_fill(question: str,
 
     return [{"role": "user", "content": content}]
 
-def call_gpt4o_select_indices(client: OpenAI, messages: List[Dict], need_n: int) -> List[int]:
+def call_gpt4o_select_indices(client: OpenAI, model: str, temperature: float, messages: List[Dict], need_n: int) -> List[int]:
     resp = client.chat.completions.create(
-        model=MODEL,
+        model=model,
         messages=messages,
-        temperature=TEMPERATURE,
+        temperature=temperature,
         response_format={"type": "json_object"},
     )
     text = resp.choices[0].message.content
@@ -214,33 +174,62 @@ def call_gpt4o_select_indices(client: OpenAI, messages: List[Dict], need_n: int)
     except Exception:
         return []
 
+# ================== CLI 参数 ==================
+def parse_args():
+    ap = argparse.ArgumentParser(description="Extract keyframes from videos using reasoning timestamps, optionally LLM-fill from candidates.")
+    # 路径
+    ap.add_argument("--in-meta", required=True, help="输入元数据 JSON")
+    ap.add_argument("--video-dirs", required=True, help="视频目录（单个 dir）")
+    ap.add_argument("--out-keyframes-dir", required=True, help="关键帧输出目录")
+    ap.add_argument("--out-candidates-dir", required=True, help="候选帧输出目录")
+    ap.add_argument("--output", required=True, help="带 frames 字段的输出 JSON")
+    # 字段映射
+    ap.add_argument("--field.video_id", dest="f_video_id", required=True, help="字段名：视频ID")
+    ap.add_argument("--field.question_id", dest="f_question_id", required=True, help="字段名：问题ID（用于子目录命名）")
+    ap.add_argument("--field.question", dest="f_question", required=True, help="字段名：问题文本")
+    ap.add_argument("--field.answer", dest="f_answer", required=True, help="字段名：标准答案")
+    ap.add_argument("--field.reasoning", dest="f_reasoning", required=True, help="字段名：推理/解析文本")
+    ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_",
+                    help="选项字段前缀（默认：answer_choice_，聚合 answer_choice_0..4）")
+    # 策略参数
+    ap.add_argument("--min-select", type=int, default=4, help="最少关键帧数量，不足则用 LLM 补齐（默认 4）")
+    ap.add_argument("--k-candidates", type=int, default=100, help="候选帧采样数量 K（默认 100）")
+    ap.add_argument("--candidate-max-wh", type=int, default=512, help="候选缩略图最大片边（默认 512）")
+    ap.add_argument("--candidate-jpeg-q", type=int, default=4, help="候选缩略图 JPEG 质量（默认 4）")
+    ap.add_argument("--close-sec", type=float, default=0.5, help="候选与 GT 的最小间隔秒（默认 0.5）")
+    ap.add_argument("--model", default="gpt-4o", help="用于补帧选择的 LLM 模型（默认 gpt-4o）")
+    ap.add_argument("--temperature", type=float, default=0.0, help="LLM 采样温度（默认 0.0）")
+    return ap.parse_args()
+
 # ================== 主逻辑 ==================
 def main():
-    ensure_dir(OUT_KEYFRAMES)
-    ensure_dir(OUT_CANDIDATES)
+    args = parse_args()
+
+    ensure_dir(args.out_keyframes_dir)
+    ensure_dir(args.out_candidates_dir)
 
     # 只有在需要补帧时才需要 OPENAI_API_KEY
     api_key = os.environ.get("OPENAI_API_KEY", "")
+    client = OpenAI(api_key=api_key) if api_key else None
 
-    # 读入抽样后的 meta
-    if not pathlib.Path(SAMPLED_META).exists():
-        raise FileNotFoundError(f"Missing meta: {SAMPLED_META}")
-    items = json.load(open(SAMPLED_META, "r"))
+    # 读入 meta
+    meta_path = pathlib.Path(args.in_meta)
+    if not meta_path.exists():
+        raise FileNotFoundError(f"Missing meta: {args.in_meta}")
+    items = json.load(open(meta_path, "r"))
 
     all_results = []
     need_llm_total = 0
     gt_total_saved = 0
 
-    client = OpenAI(api_key=api_key) if api_key else None
-
     for it in items:
-        vid = it.get("video_id")
-        qkey = it.get("key", vid)
-        q = it.get("question", "")
-        answer = it.get("answer")
-        reasoning = it.get("reasoning", "")
+        vid = str(it.get(args.f_video_id))
+        qkey = str(it.get(args.f_question_id, vid))
+        q = it.get(args.f_question, "")
+        answer = it.get(args.f_answer)
+        reasoning = it.get(args.f_reasoning, "")
 
-        video_path = find_video_file(vid)
+        video_path = find_video_file(args.video_dirs, vid)
         if not video_path:
             print(f"[skip] video not found for {vid}")
             continue
@@ -266,10 +255,10 @@ def main():
         gt_times = sorted(set(round(t, 3) for t in clamped))
         print(f"  reasoning times found: {len(gt_times)} -> {gt_times[:10]}{' ...' if len(gt_times)>10 else ''}")
 
-        keyframe_dir = pathlib.Path(OUT_KEYFRAMES) / qkey
+        keyframe_dir = pathlib.Path(args.out_keyframes_dir) / qkey
         ensure_dir(str(keyframe_dir))
 
-        # 2) 先把 reasoning 的时间点全部截帧保存（如果 >=4，就全存完）
+        # 2) 先把 reasoning 的时间点全部截帧保存（如果 >=min_select，就全存完）
         frame_out_paths: List[str] = []
         for i, t in enumerate(gt_times, start=1):
             out_png = str(keyframe_dir / f"keyframe_{i}.png")
@@ -281,15 +270,15 @@ def main():
 
         gt_total_saved += len(frame_out_paths)
 
-        # 3) 如果少于 4 张，用 LLM 从候选帧里补到 4 张
-        if len(frame_out_paths) < N_MIN_SELECT:
-            need = N_MIN_SELECT - len(frame_out_paths)
+        # 3) 如果少于 min_select，用 LLM 从候选帧里补到 min_select
+        if len(frame_out_paths) < args.min_select:
+            need = args.min_select - len(frame_out_paths)
             if not client:
                 print("  [warn] OPENAI_API_KEY not set; cannot fill by LLM. Skipping video.")
                 continue
 
             # 生成候选帧
-            # 均匀采样 K_CANDIDATES，过滤掉与已有 GT 时间点太接近的候选（例如 0.5s 内）
+            # 均匀采样 K_CANDIDATES，过滤掉与已有 GT 时间点太接近的候选（close-sec 内）
             def gen_uniform_times(duration: float, k: int) -> List[float]:
                 if duration <= 0: return []
                 pad = min(1.0, duration * 0.02)
@@ -297,23 +286,21 @@ def main():
                 if usable <= 0: return [duration / 2.0] * k
                 return [pad + (i + 1) * usable / (k + 1) for i in range(k)]
 
-            cand_times = gen_uniform_times(duration, K_CANDIDATES)
-            # 去重靠近 GT 时间（0.5s 内）
+            cand_times = gen_uniform_times(duration, args.k_candidates)
             used = set(gt_times)
-            def is_close(t: float) -> bool:
-                return any(abs(t - u) <= 0.5 for u in used)
 
-            cand_dir = pathlib.Path(OUT_CANDIDATES) / qkey
+            def is_close(t: float) -> bool:
+                return any(abs(t - u) <= args.close_sec for u in used)
+
+            cand_dir = pathlib.Path(args.out_candidates_dir) / qkey
             ensure_dir(str(cand_dir))
             cand_infos: List[Tuple[int, float, str]] = []
-            skipped_close = 0
             for idx, t in enumerate(cand_times):
                 if is_close(t):
-                    skipped_close += 1
                     continue
                 out_jpg = str(cand_dir / f"cand_{idx:02d}.jpg")
                 try:
-                    extract_candidate_frame(video_path, t, out_jpg)
+                    extract_candidate_frame(video_path, t, out_jpg, max_wh=args.candidate_max_wh, q=args.candidate_jpeg_q)
                     cand_infos.append((len(cand_infos), t, out_jpg))  # 重新编号连续
                 except Exception as e:
                     print(f"  [cand fail] t={t:.2f}s: {e}")
@@ -322,14 +309,21 @@ def main():
                 print(f"  [skip] too few candidate frames ({len(cand_infos)}) to fill {need}.")
                 continue
 
+            # 收集答案选项
+            choices = []
+            for i in range(5):
+                k = f"{args.f_choices_prefix}{i}"
+                if k in it and it[k]:
+                    choices.append(it[k])
+
             messages = build_messages_for_fill(
                 question=q,
-                answer_choices=[it[k] for k in [f"answer_choice_{i}" for i in range(5)] if k in it and it[k]],
+                answer_choices=choices,
                 answer=answer,
                 candidate_infos=cand_infos,
                 need_n=need,
             )
-            sel = call_gpt4o_select_indices(client, messages, need)
+            sel = call_gpt4o_select_indices(client, args.model, args.temperature, messages, need)
             if len(sel) != need:
                 print(f"  [skip] LLM did not return enough indices (need {need}, got {sel}).")
                 continue
@@ -360,11 +354,11 @@ def main():
         all_results.append(rec)
         print(f"  DONE {vid}: saved {len(frame_out_paths)} frames")
 
-    ensure_dir(pathlib.Path(OUT_META).parent.as_posix())
-    with open(OUT_META, "w") as f:
+    ensure_dir(pathlib.Path(args.output).parent.as_posix())
+    with open(args.output, "w") as f:
         json.dump(all_results, f, indent=2, ensure_ascii=False)
 
-    print(f"\nALL DONE. Saved to {OUT_META}.")
+    print(f"\nALL DONE. Saved to {args.output}.")
     print(f"Videos processed: {len(all_results)} | used LLM fill for: {need_llm_total} | GT frames saved: {gt_total_saved}")
 
 if __name__ == "__main__":

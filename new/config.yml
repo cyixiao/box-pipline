@@ -1,0 +1,62 @@
+fields:
+  video_id: video_id
+  question_id: key
+  question: question
+  answer: answer
+  reasoning: reasoning
+  choices_prefix: answer_choice_
+  frames: frames
+  frame_labels: frame_labels
+  bboxes: bbox_pix
+  enlarge_out: enlarge_latent
+  bbox_out: "boundingbox_latent"
+
+download:
+  in_meta: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva.json
+  out_dir: /home/cyixiao/Project/videollm/pipline/videos/minerva
+  overrides:
+    url: url
+
+keyframes:
+  in_meta: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva.json
+  video_dirs: /home/cyixiao/Project/videollm/pipline/videos/minerva
+  out_keyframes_dir: /home/cyixiao/Project/videollm/pipline/datasets/train/latent/keyframes
+  out_candidates_dir: /home/cyixiao/Project/videollm/pipline/datasets/train/latent/candidates
+  output: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_keyframes.json
+  params:
+    min_select: 4
+    k_candidates: 100
+    candidate_max_wh: 512
+    candidate_jpeg_q: 4
+    close_sec: 0.5
+    model: gpt-4o
+    temperature: 0.0
+
+labels:
+  in_meta: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_keyframes.json
+  output:  /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_labels.json
+  params:
+    model: gpt-4o
+    temperature: 0.0
+
+bbox:
+  in_meta: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_labels.json
+  output:  /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_boxes.json
+  params:
+    model_id: IDEA-Research/grounding-dino-base
+    box_threshold: 0.30
+    text_threshold: 0.25
+
+latents:
+  in_keyframes: /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_boxes.json
+  in_meta:      /home/cyixiao/Project/videollm/pipline/datasets/train/minerva.json
+  output:       /home/cyixiao/Project/videollm/pipline/datasets/train/minerva_latent.json
+  out_enlarge_dir: /home/cyixiao/Project/videollm/pipline/datasets/train/latent/enlarge
+  out_bbox_dir:    /home/cyixiao/Project/videollm/pipline/datasets/train/latent/bbox
+  params:
+    rel_root_enlarge: /latent/enlarge
+    rel_root_bbox: /latent/bbox
+    filename_template: keyframe_{i}.png
+    draw_width: 3
+    padding_pix: 0
+    resize_short: 0

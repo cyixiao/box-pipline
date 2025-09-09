@@ -9,7 +9,7 @@ def parse_args():
     ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：frames 列表")
     ap.add_argument("--field.question", dest="f_question", required=True, help="字段名：问题文本")
     ap.add_argument("--field.answer", dest="f_answer", required=True, help="字段名：正确答案")
-    ap.add_argument("--field.reasoning", dest="f_reasoning", required=True, help="字段名：推理/解析")
+    ap.add_argument("--field.reasoning", dest="f_reasoning", default="", help="字段名：推理/解析；可留空表示该数据集没有该字段")
     ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_", help="选项字段前缀（默认：answer_choice_）")
     ap.add_argument("--model", default="gpt-4o", help="LLM 模型（默认：gpt-4o）")
     ap.add_argument("--temperature", type=float, default=0.0, help="LLM 温度（默认：0.0）")
@@ -105,7 +105,10 @@ def main():
         vid = rec.get("video_id")
         q = rec.get(args.f_question, "")
         ans = rec.get(args.f_answer)
-        reasoning = rec.get(args.f_reasoning, "")
+        if args.f_reasoning:
+            reasoning = rec.get(args.f_reasoning, "")
+        else:
+            reasoning = ""
         frames: List[str] = rec.get(args.f_frames, []) or []
 
         # 选项

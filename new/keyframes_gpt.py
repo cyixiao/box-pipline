@@ -188,7 +188,7 @@ def parse_args():
     ap.add_argument("--field.question_id", dest="f_question_id", required=True, help="字段名：问题ID（用于子目录命名）")
     ap.add_argument("--field.question", dest="f_question", required=True, help="字段名：问题文本")
     ap.add_argument("--field.answer", dest="f_answer", required=True, help="字段名：标准答案")
-    ap.add_argument("--field.reasoning", dest="f_reasoning", required=True, help="字段名：推理/解析文本")
+    ap.add_argument("--field.reasoning", dest="f_reasoning", default="", help="字段名：推理/解析文本；可留空表示该数据集没有该字段")
     ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_",
                     help="选项字段前缀（默认：answer_choice_，聚合 answer_choice_0..4）")
     # 策略参数
@@ -204,6 +204,9 @@ def parse_args():
 # ================== 主逻辑 ==================
 def main():
     args = parse_args()
+
+    if not (args.f_reasoning and str(args.f_reasoning).strip()):
+        print("[info] No reasoning field provided; will extract 0 GT timestamps and rely on LLM/candidate frames to reach --min-select (if OPENAI_API_KEY is set).")
 
     ensure_dir(args.out_keyframes_dir)
     ensure_dir(args.out_candidates_dir)
@@ -227,7 +230,10 @@ def main():
         qkey = str(it.get(args.f_question_id, vid))
         q = it.get(args.f_question, "")
         answer = it.get(args.f_answer)
-        reasoning = it.get(args.f_reasoning, "")
+        if args.f_reasoning:
+            reasoning = it.get(args.f_reasoning, "")
+        else:
+            reasoning = ""
 
         video_path = find_video_file(args.video_dirs, vid)
         if not video_path:
@@ -242,7 +248,10 @@ def main():
             continue
 
         # 1) 解析 reasoning 时间点
-        times = extract_times_from_reasoning(reasoning)
+        if reasoning:
+            times = extract_times_from_reasoning(reasoning)
+        else:
+            times = []
         # clamp 到视频长度内
         clamped: List[float] = []
         for t in times:

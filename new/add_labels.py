@@ -4,21 +4,20 @@ from openai import OpenAI
 
 def parse_args():
     ap = argparse.ArgumentParser(description="Generate short frame-level labels for keyframes using an LLM.")
-    ap.add_argument("--in-meta", required=True, help="输入元数据 JSON（包含 frames 等字段）")
-    ap.add_argument("--output", required=True, help="输出 JSON（写入 frame_labels 字段）")
-    ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：frames 列表")
-    ap.add_argument("--field.question", dest="f_question", required=True, help="字段名：问题文本")
-    ap.add_argument("--field.answer", dest="f_answer", required=True, help="字段名：正确答案")
-    ap.add_argument("--field.reasoning", dest="f_reasoning", default="", help="字段名：推理/解析；可留空表示该数据集没有该字段")
-    ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_", help="选项字段前缀（默认：answer_choice_）")
-    ap.add_argument("--model", default="gpt-4o", help="LLM 模型（默认：gpt-4o）")
-    ap.add_argument("--temperature", type=float, default=0.0, help="LLM 温度（默认：0.0）")
+    ap.add_argument("--in-meta", required=True, help="Input metadata JSON (contains fields like 'frames')")
+    ap.add_argument("--output", required=True, help="Output JSON (writes 'frame_labels' field)")
+    ap.add_argument("--field.frames", dest="f_frames", required=True, help="Field name: list of frame paths")
+    ap.add_argument("--field.question", dest="f_question", required=True, help="Field name: question text")
+    ap.add_argument("--field.answer", dest="f_answer", required=True, help="Field name: correct answer")
+    ap.add_argument("--field.reasoning", dest="f_reasoning", default="", help="Field name: reasoning/explanation; leave empty if the dataset lacks this field")
+    ap.add_argument("--field.choices-prefix", dest="f_choices_prefix", default="answer_choice_", help="Answer-choice field prefix (default: answer_choice_)")
+    ap.add_argument("--model", default="gpt-4o", help="LLM model (default: gpt-4o)")
+    ap.add_argument("--temperature", type=float, default=0.0, help="LLM sampling temperature (default: 0.0)")
     return ap.parse_args()
 
-# ================== 工具函数 ==================
 def ensure_parent(path: str):
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
-
+# Encode a local image file as a base64 data URL for the chat API
 def image_to_data_url(img_path: str) -> str:
     with open(img_path, "rb") as f:
         b = f.read()
@@ -27,6 +26,7 @@ def image_to_data_url(img_path: str) -> str:
     mime = "image/jpeg" if ext in (".jpg", ".jpeg") else "image/png"
     return f"data:{mime};base64,{b64}"
 
+# Build a strict prompt that asks for ONE short, JSON-only object label
 def build_label_prompt(question: str,
                        answer: Optional[str],
                        reasoning: Optional[str],
@@ -58,6 +58,7 @@ def build_label_prompt(question: str,
     ]
     return {"type": "text", "text": "\n".join(lines)}
 
+# Call the LLM to label a single frame; returns None on failure
 def call_gpt4o_label(client: OpenAI, model: str, temperature: float,
                      img_path: str,
                      question: str,
@@ -69,6 +70,7 @@ def call_gpt4o_label(client: OpenAI, model: str, temperature: float,
         {"type": "image_url", "image_url": {"url": image_to_data_url(img_path)}}
     ]
     try:
+        # Force JSON response for safer downstream parsing
         resp = client.chat.completions.create(
             model=model,
             temperature=temperature,
@@ -80,17 +82,15 @@ def call_gpt4o_label(client: OpenAI, model: str, temperature: float,
         label = data.get("label", "")
         if isinstance(label, str) and label.strip():
             lbl = label.strip().lower()
-            # 简单清洗：只保留较短标签
             if len(lbl.split()) <= 4 and len(lbl) <= 40:
                 return lbl
     except Exception as e:
-        # 可按需打印 e 进行调试
         pass
     return None
 
-# ================== 主流程 ==================
 def main():
     args = parse_args()
+    # Require an API key early to fail fast
     api_key = os.environ.get("OPENAI_API_KEY", "")
     if not api_key:
         raise RuntimeError("OPENAI_API_KEY not set. `export OPENAI_API_KEY=...`")
@@ -98,6 +98,7 @@ def main():
 
     if not pathlib.Path(args.in_meta).exists():
         raise FileNotFoundError(f"missing: {args.in_meta}")
+    # Read records from the metadata JSON
     items: List[Dict[str, Any]] = json.load(open(args.in_meta, "r"))
 
     updated = []
@@ -111,13 +112,13 @@ def main():
             reasoning = ""
         frames: List[str] = rec.get(args.f_frames, []) or []
 
-        # 选项
         choices: List[str] = []
         for i in range(5):
             k = f"{args.f_choices_prefix}{i}"
             if k in rec and rec[k]:
                 choices.append(str(rec[k]))
 
+        # If no frame paths, keep the record unchanged
         if not frames:
             updated.append(rec)
             print(f"[skip] {vid} has no frames")
@@ -127,21 +128,22 @@ def main():
         print(f"\n>>> {vid}: {len(frames)} frames")
         for idx, fp in enumerate(frames, 1):
             if not pathlib.Path(fp).exists():
-                labels.append("scene")  # 兜底
+                labels.append("scene")
                 print(f"  frame_{idx}: missing -> label=scene")
                 continue
             label = call_gpt4o_label(client, args.model, args.temperature, fp, q, ans, reasoning, choices)
+            # Fallback label when the LLM fails or returns empty
             if not label:
-                label = "scene"  # 兜底
+                label = "scene"
             labels.append(label)
             print(f"  frame_{idx}: label={label}")
 
-        # 写回
         out_rec = dict(rec)
-        out_rec["frame_labels"] = labels  # 与 frames 顺序一一对应
+        out_rec["frame_labels"] = labels
         updated.append(out_rec)
 
     ensure_parent(args.output)
+    # Write updated records with 'frame_labels' to output JSON
     with open(args.output, "w") as f:
         json.dump(updated, f, indent=2, ensure_ascii=False)
 

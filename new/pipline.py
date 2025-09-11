@@ -63,7 +63,7 @@ def derive_paths_from_root(root: pathlib.Path) -> Dict[str, str]:
 
 def build_cmd(stage: str, cfg: Dict[str, Any], paths: Dict[str, str]) -> List[str]:
     fields = cfg.get("fields", {})
-    s = cfg.get(stage, {})  # only for params/overrides
+    s = cfg.get(stage, {})
     params = s.get("params", {})
 
     if stage == "download":

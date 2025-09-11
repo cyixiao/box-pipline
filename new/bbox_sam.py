@@ -1,6 +1,3 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-
 import os, json, pathlib, re, argparse
 from typing import List, Dict, Any, Optional, Tuple
 
@@ -8,7 +5,6 @@ import torch
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForZeroShotObjectDetection
 
-# ================== 工具函数 ==================
 def ensure_parent(path: str):
     pathlib.Path(path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -23,14 +19,14 @@ def clamp_xyxy(x1, y1, x2, y2, W, H):
 
 def clean_label(s: str) -> str:
     s = (s or "").lower().strip()
-    s = re.sub(r"[^a-z0-9 ]+", "", s)   # 去标点
+    s = re.sub(r"[^a-z0-9 ]+", "", s)
     s = re.sub(r"\s+", " ", s)
     return s
 
 def build_query_text(label: str) -> str:
     """
-    Grounding DINO 约定：每个短语小写、以 '.' 结尾；可以多个短语用 '. ' 串起来。
-    我们这里每次只查一个主标签。
+    Grounding DINO convention: each phrase should be lowercase and end with a '.'; multiple phrases can be joined with '. '.
+    Here we query only one primary label each time.
     """
     label = clean_label(label)
     if not label:
@@ -41,12 +37,12 @@ def build_query_text(label: str) -> str:
 
 def pick_best_box(results: Dict[str, Any], want_label: str) -> Optional[List[float]]:
     """
-    在 post_process 结果里，筛选出与 want_label 匹配且分数最高的一框。
-    results 结构如：{'boxes': Tensor[N,4], 'labels': [...], 'scores': Tensor[N]}
+    From the post-processed results, select the box whose label matches `want_label` with the highest score.
+    Results structure: {'boxes': Tensor[N,4], 'labels': [...], 'scores': Tensor[N]}
     """
     if not results or "boxes" not in results:
         return None
-    boxes = results["boxes"]    # [N,4], xyxy (像素，已按 target_sizes 反缩放)
+    boxes = results["boxes"]
     labels = results.get("labels", [])
     scores = results.get("scores", None)
 
@@ -62,9 +58,8 @@ def pick_best_box(results: Dict[str, Any], want_label: str) -> Optional[List[flo
             best_idx = i
     if best_idx < 0:
         return None
-    return boxes[best_idx].tolist()  # [x1,y1,x2,y2] in pixels
+    return boxes[best_idx].tolist()
 
-# ================== 模型封装 ==================
 class GroundingDINO:
     def __init__(self, model_id: str, device: str, box_threshold: float, text_threshold: float):
         self.processor = AutoProcessor.from_pretrained(model_id)
@@ -76,7 +71,7 @@ class GroundingDINO:
     @torch.no_grad()
     def detect_one(self, image: Image.Image, label: str) -> Optional[List[int]]:
         """
-        用单个标签做一次检测，返回像素坐标的 xyxy；失败返回 None
+        Run detection with a single label and return pixel xyxy coordinates; return None on failure.
         """
         want = clean_label(label)
         query = build_query_text(want)
@@ -92,14 +87,12 @@ class GroundingDINO:
             input_ids=inputs.input_ids,
             box_threshold=self.box_threshold,
             text_threshold=self.text_threshold,
-            target_sizes=[(H, W)],  # 注意顺序是 (height, width)
+            target_sizes=[(H, W)],
         )
-        # 这里只有一张图，取第 0 个结果
         res0 = processed[0] if processed else None
         if not res0:
             return None
 
-        # 严格匹配 want（labels 里是文本短语）
         box = pick_best_box(res0, want)
         if box is None:
             return None
@@ -110,33 +103,30 @@ class GroundingDINO:
     @torch.no_grad()
     def detect_with_fallbacks(self, image: Image.Image, primary: Optional[str]) -> Optional[List[int]]:
         """
-        只使用提供的 primary label；若无或检测失败则返回 None。
+        Use only the provided primary label; return None if absent or if detection fails.
         """
         if not primary or not str(primary).strip():
             return None
         return self.detect_one(image, primary)
 
-# ================== CLI ==================
 def parse_args():
     ap = argparse.ArgumentParser(description="Zero-shot object detection for keyframes (Grounding DINO), write pixel xyxy boxes.")
-    # 路径
-    ap.add_argument("--in-meta", required=True, help="输入 JSON（含帧路径、可选帧标签）")
-    ap.add_argument("--output", required=True, help="输出 JSON（写入 bbox 字段）")
-    # 字段映射
-    ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：frames 列表")
-    ap.add_argument("--field.frame_labels", dest="f_frame_labels", required=True, help="字段名：frame_labels 列表")
-    ap.add_argument("--field.bboxes-out", dest="f_bboxes_out", default="bbox_pix", help="输出 bbox 字段名（默认：bbox_pix）")
-    # 模型与阈值
-    ap.add_argument("--model-id", default="IDEA-Research/grounding-dino-base", help="模型ID（默认：IDEA-Research/grounding-dino-base）")
-    ap.add_argument("--box-threshold", type=float, default=0.30, help="框分数阈值（默认 0.30）")
-    ap.add_argument("--text-threshold", type=float, default=0.25, help="文本匹配阈值（默认 0.25）")
+    # Paths
+    ap.add_argument("--in-meta", required=True, help="Input JSON (contains frame paths and optional frame labels)")
+    ap.add_argument("--output", required=True, help="Output JSON (writes the bbox field)")
+    # Field mapping
+    ap.add_argument("--field.frames", dest="f_frames", required=True, help="Field name: frames list")
+    ap.add_argument("--field.frame_labels", dest="f_frame_labels", required=True, help="Field name: frame_labels list")
+    ap.add_argument("--field.bboxes-out", dest="f_bboxes_out", default="bbox_pix", help="Output bbox field name (default: bbox_pix)")
+    # Model and thresholds
+    ap.add_argument("--model-id", default="IDEA-Research/grounding-dino-base", help="Model ID (default: IDEA-Research/grounding-dino-base)")
+    ap.add_argument("--box-threshold", type=float, default=0.30, help="Box score threshold (default 0.30)")
+    ap.add_argument("--text-threshold", type=float, default=0.25, help="Text match threshold (default 0.25)")
     return ap.parse_args()
 
-# ================== 主流程 ==================
 def main():
     args = parse_args()
 
-    # 设备自动选择
     device = "cuda" if torch.cuda.is_available() else "cpu"
     detector = GroundingDINO(args.model_id, device, args.box_threshold, args.text_threshold)
 
@@ -175,7 +165,6 @@ def main():
             box_pix = detector.detect_with_fallbacks(img, label)
 
             if box_pix is None:
-                # 兜底：整图
                 box_pix = [0, 0, W-1, H-1]
                 fallback += 1
                 total_fallbacks += 1
@@ -185,7 +174,6 @@ def main():
 
             bbox_pix_list.append(box_pix)
 
-        # 写回
         rec[args.f_bboxes_out]  = bbox_pix_list
         updated.append(rec)
 

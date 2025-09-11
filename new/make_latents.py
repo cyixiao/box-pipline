@@ -49,49 +49,42 @@ def save_bbox_vis(img_path: str, box_pix: List[int], out_path: str, draw_width: 
     ensure_parent(out_path)
     img.save(out_path)
 
-# ================ CLI ================
 def parse_args():
     ap = argparse.ArgumentParser(description="Generate enlarge crops and bbox-visualization images, and write relative paths back to metadata.")
-    # 路径
-    ap.add_argument("--in-keyframes", required=True, help="输入 JSON（包含 frames 和 bboxes）")
-    ap.add_argument("--in-meta", required=True, help="输入原始样本 JSON（需写回输出路径）")
-    ap.add_argument("--output", required=True, help="输出 JSON（写入 enlarge/bbox 相对路径）")
-    ap.add_argument("--out-enlarge-dir", required=True, help="enlarge 裁剪图输出目录（绝对路径）")
-    ap.add_argument("--out-bbox-dir", required=True, help="bbox 可视化图输出目录（绝对路径）")
+    ap.add_argument("--in-keyframes", required=True, help="Input JSON (contains frames and bboxes)")
+    ap.add_argument("--in-meta", required=True, help="Input original samples JSON (paths will be written back)")
+    ap.add_argument("--output", required=True, help="Output JSON (writes relative paths for enlarge/bbox)")
+    ap.add_argument("--out-enlarge-dir", required=True, help="Output dir for enlarge crops (absolute path)")
+    ap.add_argument("--out-bbox-dir", required=True, help="Output dir for bbox visualizations (absolute path)")
 
-    # 字段映射
-    ap.add_argument("--field.video_id", dest="f_video_id", required=True, help="字段名：视频ID")
-    ap.add_argument("--field.question_id", dest="f_question_id", required=True, help="字段名：问题ID（用于匹配 keyframes 记录）")
-    ap.add_argument("--field.frames", dest="f_frames", required=True, help="字段名：在 keyframes JSON 中的帧列表")
-    ap.add_argument("--field.bboxes", dest="f_bboxes", required=True, help="字段名：在 keyframes JSON 中的 bbox 列表（像素 xyxy）")
-    ap.add_argument("--field.enlarge-out", dest="f_enlarge_out", default="enlarge_latent", help="写回到样本 JSON 的 enlarge 字段名（默认：enlarge_latent）")
-    ap.add_argument("--field.bbox-out", dest="f_bbox_out", default="boundingbox _latent", help="写回到样本 JSON 的 bbox 字段名（默认：'boundingbox _latent'，注意有空格）")
+    ap.add_argument("--field.video_id", dest="f_video_id", required=True, help="Field name: video ID")
+    ap.add_argument("--field.question_id", dest="f_question_id", required=True, help="Field name: question ID (used to match keyframes)")
+    ap.add_argument("--field.frames", dest="f_frames", required=True, help="Field name: frames list in keyframes JSON")
+    ap.add_argument("--field.bboxes", dest="f_bboxes", required=True, help="Field name: bbox list in keyframes JSON (pixel xyxy)")
+    ap.add_argument("--field.enlarge-out", dest="f_enlarge_out", default="enlarge_latent", help="Field name to write enlarge paths back into samples JSON (default: enlarge_latent)")
+    ap.add_argument("--field.bbox-out", dest="f_bbox_out", default="boundingbox _latent", help="Field name to write bbox paths back into samples JSON (default: 'boundingbox _latent', note the space)")
 
-    # 相对路径与文件命名
-    ap.add_argument("--rel-root-enlarge", default="/latent/enlarge", help="写回 JSON 的 enlarge 相对根前缀（默认：/latent/enlarge）")
-    ap.add_argument("--rel-root-bbox", default="/latent/bbox", help="写回 JSON 的 bbox 相对根前缀（默认：/latent/bbox）")
-    ap.add_argument("--filename-template", default="keyframe_{i}.png", help="输出文件名模板，支持 {i}（从1开始）")
+    ap.add_argument("--rel-root-enlarge", default="/latent/enlarge", help="Relative root prefix written to JSON for enlarge (default: /latent/enlarge)")
+    ap.add_argument("--rel-root-bbox", default="/latent/bbox", help="Relative root prefix written to JSON for bbox (default: /latent/bbox)")
+    ap.add_argument("--filename-template", default="keyframe_{i}.png", help="Output filename template; supports {i} (1-based)")
 
-    # 图像可视化与裁剪
-    ap.add_argument("--draw-width", type=int, default=3, help="画框线宽（默认 3）")
-    ap.add_argument("--padding-pix", type=int, default=0, help="enlarge 裁剪 padding 像素（默认 0）")
-    ap.add_argument("--resize-short", type=int, default=0, help="enlarge 输出短边统一到该尺寸（0 表示不缩放）")
+    ap.add_argument("--draw-width", type=int, default=3, help="Line width for drawing boxes (default 3)")
+    ap.add_argument("--padding-pix", type=int, default=0, help="Padding (pixels) around enlarge crop (default 0)")
+    ap.add_argument("--resize-short", type=int, default=0, help="Resize short side of enlarge output to this length (0 = no resize)")
     return ap.parse_args()
 
-# ================ 主流程 ================
 def main():
     args = parse_args()
 
-    # 准备输出目录
     ensure_dir(args.out_enlarge_dir)
     ensure_dir(args.out_bbox_dir)
 
-    # 读取 keyframes+bboxes
     if not pathlib.Path(args.in_keyframes).exists():
         raise FileNotFoundError(f"missing: {args.in_keyframes}")
+    # Load keyframes JSON and index by (video_id, question_id)
     kf_data: List[Dict[str, Any]] = json.load(open(args.in_keyframes, "r"))
 
-    # 建索引： (video_id, question_id) -> (frames, bboxes)
+    # Build an index: (vid, qid) -> (frames, bboxes)
     kf_index: Dict[Tuple[str, str], Tuple[List[str], List[List[int]]]] = {}
     for rec in kf_data:
         vid = str(rec.get(args.f_video_id))
@@ -102,24 +95,26 @@ def main():
             continue
         kf_index[(vid, qid)] = (frames, bxy_pix)
 
-    # 读取样本 meta（按其顺序生成 qidx 并写回）
     if not pathlib.Path(args.in_meta).exists():
         raise FileNotFoundError(f"missing: {args.in_meta}")
     sm_data: List[Dict[str, Any]] = json.load(open(args.in_meta, "r"))
 
     updated = []
-    dropped_missing = 0      # (vid,qid) not found in keyframes index
-    dropped_no_enlarge = 0   # processed but produced 0 enlarge images
+    dropped_missing = 0
+    dropped_no_enlarge = 0
     vid_counter: Dict[str, int] = {}
 
+    # Process each sample and generate outputs
     for item in sm_data:
         vid = str(item.get(args.f_video_id))
         qid = str(item.get(args.f_question_id, ""))
 
         qidx = vid_counter.get(vid, 0) + 1
         vid_counter[vid] = qidx
+        # Subdir naming: per-video counter (1-based) to avoid collisions
         subdir_name = f"{vid}_{qidx}" 
         key = (vid, qid)
+        # Skip samples that have no matching keyframes/bboxes
         if key not in kf_index:
             dropped_missing += 1
             print(f"✗ DROP {subdir_name}: no keyframes/bboxes for (vid={vid}, qid={qid})")
@@ -130,14 +125,13 @@ def main():
         enlarge_paths: List[str] = []
         bbox_paths:    List[str] = []
 
+        # For each frame/bbox pair: compute paths and write outputs
         for i in range(n):
             frame_path = frames[i]
             box = bboxes_pix[i]
-            # 绝对输出目录
             subdir_enlarge_abs = pathlib.Path(args.out_enlarge_dir) / subdir_name
             subdir_bbox_abs    = pathlib.Path(args.out_bbox_dir) / subdir_name
 
-            # 相对路径（写回 JSON）
             rel_enlarge_prefix = f"{args.rel_root_enlarge.rstrip('/')}/{subdir_name}"
             rel_bbox_prefix    = f"{args.rel_root_bbox.rstrip('/')}/{subdir_name}"
 
@@ -155,6 +149,7 @@ def main():
             except Exception as e:
                 print(f"{subdir_name} frame_{i+1} failed: {e}")
 
+        # Drop sample if no enlarge crops were successfully saved
         if len(enlarge_paths) == 0:
             dropped_no_enlarge += 1
             print(f"✗ DROP {subdir_name}: no enlarge saved")
@@ -175,3 +170,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    

@@ -33,9 +33,6 @@ if len(video_ids) == 0:
 
 succeeded, failed = set(), set()
 
-# Optional cookies: set one of these env vars on the server
-#   YTDLP_COOKIES_FILE=/path/to/cookies.txt   (exported from your desktop browser)
-#   YTDLP_COOKIES_FROM_BROWSER=chrome|firefox|edge|brave (only works if that browser profile exists on THIS machine)
 cookies_file = os.environ.get("YTDLP_COOKIES_FILE", "").strip()
 cookies_from_browser = os.environ.get("YTDLP_COOKIES_FROM_BROWSER", "").strip()
 if cookies_file and not pathlib.Path(cookies_file).exists():
@@ -48,8 +45,6 @@ elif cookies_file:
 else:
     print("[info] No cookies provided. If you hit 'Sign in to confirm you’re not a bot', set YTDLP_COOKIES_FILE or YTDLP_COOKIES_FROM_BROWSER.")
 
-# Force web client and set a desktop User-Agent to reduce bot checks.
-# You can override these via env vars YTDLP_EXTRACTOR_ARGS and YTDLP_UA.
 extractor_args = os.environ.get("YTDLP_EXTRACTOR_ARGS", "youtube:player_client=web")
 user_agent = os.environ.get(
     "YTDLP_UA",
@@ -64,7 +59,7 @@ for vid in video_ids:
     else:
         url = f"https://www.youtube.com/watch?v={vid}"
     out_tpl = f"{OUT_DIR}/{vid}.%(ext)s"
-    # Skip if final output already exists (merged to mp4)
+    # Skip if final output already exists
     final_path = pathlib.Path(OUT_DIR) / f"{vid}.mp4"
     if final_path.exists() and final_path.stat().st_size > 0:
         print(f"[skip] {final_path} already exists. Skipping download.")
@@ -91,7 +86,6 @@ for vid in video_ids:
     cmd.append(url)
     print("Downloading:", url)
     subprocess.run(cmd, check=False)
-    # Determine success/failure
     if final_path.exists() and final_path.stat().st_size > 0:
         print(f"[ok] {vid} -> {final_path}")
         succeeded.add(vid)
